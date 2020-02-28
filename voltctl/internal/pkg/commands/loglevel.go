@@ -16,6 +16,7 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	flags "github.com/jessevdk/go-flags"
 	"github.com/opencord/voltctl/pkg/format"
@@ -25,12 +26,19 @@ import (
 	"strings"
 )
 
+const (
+	defaultComponentName = "global"
+	defaultPackageName   = "default"
+)
+
+// LogLevelOutput represents the  output structure for the loglevel
 type LogLevelOutput struct {
 	ComponentName string
 	Status        string
 	Error         string
 }
 
+// SetLogLevelOpts represents the given input for the set loglevel
 type SetLogLevelOpts struct {
 	OutputOptions
 	Args struct {
@@ -39,6 +47,7 @@ type SetLogLevelOpts struct {
 	} `positional-args:"yes" required:"yes"`
 }
 
+// ListLogLevelOpts represents the given input for the list loglevel
 type ListLogLevelsOpts struct {
 	ListOutputOptions
 	Args struct {
@@ -46,6 +55,7 @@ type ListLogLevelsOpts struct {
 	} `positional-args:"yes" required:"yes"`
 }
 
+// ClearLogLevelOpts represents the given input for the clear loglevel
 type ClearLogLevelsOpts struct {
 	OutputOptions
 	Args struct {
@@ -53,6 +63,7 @@ type ClearLogLevelsOpts struct {
 	} `positional-args:"yes" required:"yes"`
 }
 
+// LogLevelOpts represents the loglevel commands
 type LogLevelOpts struct {
 	SetLogLevel    SetLogLevelOpts    `command:"set"`
 	ListLogLevels  ListLogLevelsOpts  `command:"list"`
@@ -66,75 +77,23 @@ const (
 	DEFAULT_SETLOGLEVEL_FORMAT = "table{{ .ComponentName }}\t{{.Status}}\t{{.Error}}"
 )
 
+// RegisterLogLevelCommands is used to  register set,list and clear loglevel of components
 func RegisterLogLevelCommands(parent *flags.Parser) {
-	_, err := parent.AddCommand("loglevel", "loglevel commands", "Get and set log levels", &logLevelOpts)
+	_, err := parent.AddCommand("loglevel", "loglevel commands", "list,set and clear log levels of components", &logLevelOpts)
 	if err != nil {
 		Error.Fatalf("Unable to register log level commands with voltctl command parser: %s", err.Error())
 	}
 }
 
-type componentLogController struct {
-	componentNameConfig *config.ComponentConfig
-	listConfig          *config.ComponentConfig
-	globalConfig        *config.ComponentConfig
-	configManager       *config.ConfigManager
-}
-
-func NewComponentLogController(cm *config.ConfigManager) *componentLogController {
-
-	clc := &componentLogController{
-		componentNameConfig: nil,
-		listConfig:          nil,
-		globalConfig:        nil,
-		configManager:       cm}
-
-	return clc
-}
-
-func createComponentConfig(cm *config.ConfigManager, cc *componentLogController, componentName string) {
-	if componentName == "list" {
-		cc.listConfig = cm.InitComponentConfig(componentName, config.ConfigTypeLogLevel)
-	} else {
-		cc.globalConfig = cm.InitComponentConfig("global", config.ConfigTypeLogLevel)
-		cc.componentNameConfig = cm.InitComponentConfig(componentName, config.ConfigTypeLogLevel)
-	}
-}
-
-func (c *componentLogController) setGlobalConfig(packageName, level string) error {
-	err := c.globalConfig.Save(packageName, level)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (c *componentLogController) setComponentNameConfig(packageName, level string) error {
-	err := c.componentNameConfig.Save(packageName, level)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func (c *componentLogController) listAllComponentConfig() ([]config.List, error) {
-	configList, err := c.listConfig.RetrieveList()
-	if err != nil {
-		return nil, err
-	}
-
-	return configList, nil
-}
-
-func (c *componentLogController) listGlobalConfig() (string, error) {
+func listGlobalConfig(cConfig *config.ComponentConfig) (string, error) {
 	var globalDefaultLogLevel string
-	globalLogConfig, err := c.globalConfig.RetrieveAll()
+	globalLogConfig, err := cConfig.RetrieveAll(context.Background())
 	if err != nil {
 		return "", err
 	}
 
-	for globalKey, globalLevel := range globalLogConfig {
-		if globalKey == "default" {
+	if globalLevel, ok := globalLogConfig[defaultPackageName]; ok {
+		if _, err := log.StringToLogLevel(globalLevel); err == nil {
 			globalDefaultLogLevel = globalLevel
 		}
 	}
@@ -142,98 +101,94 @@ func (c *componentLogController) listGlobalConfig() (string, error) {
 	return globalDefaultLogLevel, nil
 }
 
-func (c *componentLogController) listComponentNameConfig() (map[string]string, error) {
-	globalLevel, err := c.listGlobalConfig()
-	if err != nil {
-		return nil, err
-	}
+func listComponentNameConfig(cConfig *config.ComponentConfig, globalLevel string) (map[string]string, error) {
 
-	componentLogConfig, err := c.componentNameConfig.RetrieveAll()
+	componentLogConfig, err := cConfig.RetrieveAll(context.Background())
 	if err != nil {
 		return nil, err
 	}
 
 	if globalLevel != "" {
-		componentLogConfig["default"] = globalLevel
+		componentLogConfig[defaultPackageName] = globalLevel
 	}
 	return componentLogConfig, nil
 }
 
-func (c *componentLogController) clearGlobalConfig(packageName string) error {
-	err := c.globalConfig.Delete(packageName)
+// processCommandArgs stores  the component name and package names given in command arguments to LogLevel
+// It checks the given argument has # key or not, if # is present then split the argument for # then stores first part as component name
+// and second part as package name
+func processCommandArgs(component string) model.LogLevel {
+
+	var cNameConfig model.LogLevel
+	if strings.Contains(component, "#") {
+		val := strings.Split(component, "#")
+		cNameConfig.ComponentName = val[0]
+		cNameConfig.PackageName = strings.ReplaceAll(val[1], "/", "#")
+	} else {
+		cNameConfig.ComponentName = component
+		cNameConfig.PackageName = defaultPackageName
+	}
+
+	return cNameConfig
+}
+
+// createConfigManager initialize default kvstore then initialize ConfigManager to connect to kvstore
+func createConfigManager() (*config.ConfigManager, error) {
+	kv := NewDefaultKVStore()
+	cm, err := setConfigManager(kv)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	return nil
+	return cm, nil
 }
 
-func (c *componentLogController) clearComponentNameConfig(packageName string) error {
-	err := c.componentNameConfig.Delete(packageName)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func processCommandArgs(components []string) map[string]string {
-	componentConfig := make(map[string]string)
-
-	for _, componentKey := range components {
-		if strings.Contains(componentKey, "#") {
-			val := strings.Split(componentKey, "#")
-			componentName := val[0]
-			packageName := strings.ReplaceAll(val[1], "/", "#")
-			componentConfig[componentName] = packageName
-		} else {
-			componentConfig[componentKey] = "default"
-		}
-
-	}
-	return componentConfig
-}
-
+// This method set loglevel for components.
+// For example, using below command loglevel can be set for specific component with default packageName
+// voltctl loglevel set level  <componentName>
+// For example, using below command loglevel can be set for specific component with specific packageName
+// voltctl loglevel set level <componentName#packageName>
+// For example, using below command loglevel can be set for more than one component for default package and other component for specific packageName
+// voltctl loglevel set level <componentName1#packageName> <componentName2>
 func (options *SetLogLevelOpts) Execute(args []string) error {
 	if options.Args.Level != "" {
 		if _, err := log.StringToLogLevel(options.Args.Level); err != nil {
-			return fmt.Errorf("Please specify valid logLevel")
+			return fmt.Errorf("Unknown log level %s. Allowed values are <INFO>,<DEBUG>,<ERROR>,<WARN>,<FATAL>", options.Args.Level)
 		}
 	}
 
-	componentConfig := make(map[string]string)
+	var componentNameConfig []model.LogLevel
 	if len(options.Args.Component) == 0 {
-		componentConfig["global"] = "default"
+		cNameConfig := model.LogLevel{}
+		cNameConfig.ComponentName = defaultComponentName
+		cNameConfig.PackageName = defaultPackageName
+		componentNameConfig = append(componentNameConfig, cNameConfig)
 	} else {
-		componentConfig = processCommandArgs(options.Args.Component)
+		for _, component := range options.Args.Component {
+			cNameConfig := processCommandArgs(component)
+			componentNameConfig = append(componentNameConfig, cNameConfig)
+		}
 	}
 
-	kv := NewKVStore()
-	cm, err := kv.setKVClient()
+	cm, err := createConfigManager()
 	if err != nil {
-		return err
+		return fmt.Errorf("Unable to create configmanager %s", err)
 	}
-	cc := NewComponentLogController(cm)
 
 	var output []LogLevelOutput
 
-	for componentName, packageName := range componentConfig {
+	for _, cConfig := range componentNameConfig {
 
-		createComponentConfig(cm, cc, componentName)
-		if componentName == "global" {
-			err := cc.setGlobalConfig(packageName, options.Args.Level)
-			if err != nil {
-				output = append(output, LogLevelOutput{ComponentName: componentName, Status: "Failure", Error: err.Error()})
-			}
+		cNameConfig := cm.InitComponentConfig(cConfig.ComponentName, config.ConfigTypeLogLevel)
+
+		err := cNameConfig.Save(cConfig.PackageName, options.Args.Level, context.Background())
+		if err != nil {
+			output = append(output, LogLevelOutput{ComponentName: cConfig.ComponentName, Status: "Failure", Error: err.Error()})
 		} else {
-			err := cc.setComponentNameConfig(packageName, options.Args.Level)
-			if err != nil {
-				output = append(output, LogLevelOutput{ComponentName: componentName, Status: "Failure", Error: err.Error()})
-			}
+			output = append(output, LogLevelOutput{ComponentName: cConfig.ComponentName, Status: "Success"})
 		}
 
-		output = append(output, LogLevelOutput{ComponentName: componentName, Status: "Success"})
-
 	}
+
 	outputFormat := CharReplacer.Replace(options.Format)
 	if outputFormat == "" {
 		outputFormat = GetCommandOptionWithDefault("loglevel-set", "format", DEFAULT_SETLOGLEVEL_FORMAT)
@@ -246,59 +201,65 @@ func (options *SetLogLevelOpts) Execute(args []string) error {
 	}
 
 	GenerateOutput(&result)
+	cm.Backend.Client.Close()
 	return nil
 }
 
-func (options *ListLogLevelsOpts) listLogLevels(methodName string, args []string) error {
-	if len(options.Args.Component) == 2 {
-		return fmt.Errorf("Please don't specify more than one component name")
-	}
+// This method list loglevel for components.
+// For example, using below command loglevel can be list for specific component
+// voltctl loglevel list  <componentName>
+// For example, using below command loglevel can be list for all the components with all the packageName
+// voltctl loglevel list
+func (options *ListLogLevelsOpts) Execute(args []string) error {
 
 	var data []model.LogLevel
-	kv := NewKVStore()
-	cm, err := kv.setKVClient()
+	var componentList []string
+
+	cm, err := createConfigManager()
 	if err != nil {
-		return err
+		return fmt.Errorf("Unable to create configmanager %s", err)
 	}
-	cc := NewComponentLogController(cm)
 
 	if len(options.Args.Component) == 0 {
-		createComponentConfig(cm, cc, "list")
-		componentLogConfig, err := cc.listAllComponentConfig()
+		componentList, err = cm.RetrieveComponentList(config.ConfigTypeLogLevel)
 		if err != nil {
-			return err
-		}
-		for _, l := range componentLogConfig {
-			logLevel := model.LogLevel{}
-			pName := strings.ReplaceAll(l.PackageName, "#", "/")
-			logLevel.PopulateFrom(l.ComponentName, pName, l.Level)
-			data = append(data, logLevel)
+			return fmt.Errorf("Unable to list components %s ", err)
 		}
 	} else {
-		componentName := options.Args.Component[0]
+		componentList = append(componentList, options.Args.Component[0])
+	}
 
-		createComponentConfig(cm, cc, componentName)
+	globalConfig := cm.InitComponentConfig(defaultComponentName, config.ConfigTypeLogLevel)
+	globalLevel, _ := listGlobalConfig(globalConfig)
 
-		componentLogConfig, err := cc.listComponentNameConfig()
+	for _, componentName := range componentList {
+		cNameConfig := cm.InitComponentConfig(componentName, config.ConfigTypeLogLevel)
+
+		componentLogConfig, err := listComponentNameConfig(cNameConfig, globalLevel)
 		if err != nil {
-			return err
+			return fmt.Errorf("Unable to list components log level %s", err)
 		}
 
 		for packageName, level := range componentLogConfig {
 			logLevel := model.LogLevel{}
+			if _, err := log.StringToLogLevel(level); err != nil || packageName == "" {
+				delete(componentLogConfig, packageName)
+				continue
+			}
+
 			pName := strings.ReplaceAll(packageName, "#", "/")
 			logLevel.PopulateFrom(componentName, pName, level)
 			data = append(data, logLevel)
 		}
-
 	}
+
 	outputFormat := CharReplacer.Replace(options.Format)
 	if outputFormat == "" {
-		outputFormat = GetCommandOptionWithDefault(methodName, "format", DEFAULT_LOGLEVELS_FORMAT)
+		outputFormat = GetCommandOptionWithDefault("loglevel-list", "format", DEFAULT_LOGLEVELS_FORMAT)
 	}
 	orderBy := options.OrderBy
 	if orderBy == "" {
-		orderBy = GetCommandOptionWithDefault(methodName, "order", "")
+		orderBy = GetCommandOptionWithDefault("loglevel-list", "order", "a")
 	}
 
 	result := CommandResult{
@@ -310,51 +271,43 @@ func (options *ListLogLevelsOpts) listLogLevels(methodName string, args []string
 		Data:      data,
 	}
 	GenerateOutput(&result)
+	cm.Backend.Client.Close()
 	return nil
 }
 
-func (options *ListLogLevelsOpts) Execute(args []string) error {
-	return options.listLogLevels("loglevel-list", args)
-}
-
+// This method clear loglevel for components.
+// For example, using below command loglevel can be clear for specific component with default packageName
+// voltctl loglevel clear  <componentName>
+// For example, using below command loglevel can be clear for specific component with specific packageName
+// voltctl loglevel clear <componentName#packageName>
 func (options *ClearLogLevelsOpts) Execute(args []string) error {
-	componentConfig := make(map[string]string)
+
+	var cConfig model.LogLevel
 	if len(options.Args.Component) == 0 {
-		componentConfig["global"] = "default"
+		cConfig.ComponentName = defaultComponentName
+		cConfig.PackageName = defaultPackageName
 	} else {
-		componentConfig = processCommandArgs(options.Args.Component)
+		cConfig = processCommandArgs(options.Args.Component[0])
 	}
 
-	kv := NewKVStore()
-	cm, err := kv.setKVClient()
+	cm, err := createConfigManager()
 	if err != nil {
-		return err
+		return fmt.Errorf("Unable to create configmanager %s", err)
 	}
-	cc := NewComponentLogController(cm)
 
 	var output []LogLevelOutput
 
-	for componentName, packageName := range componentConfig {
-
-		createComponentConfig(cm, cc, componentName)
-		if componentName == "global" {
-			err := cc.clearGlobalConfig(packageName)
-			if err != nil {
-				output = append(output, LogLevelOutput{ComponentName: componentName, Status: "Failure", Error: err.Error()})
-			}
-		} else {
-			err := cc.clearComponentNameConfig(packageName)
-			if err != nil {
-				output = append(output, LogLevelOutput{ComponentName: componentName, Status: "Failure", Error: err.Error()})
-			}
-		}
-
-		output = append(output, LogLevelOutput{ComponentName: componentName, Status: "Success"})
-
+	cNameConfig := cm.InitComponentConfig(cConfig.ComponentName, config.ConfigTypeLogLevel)
+	err = cNameConfig.Delete(cConfig.PackageName, context.Background())
+	if err != nil {
+		output = append(output, LogLevelOutput{ComponentName: cConfig.ComponentName, Status: "Failure", Error: err.Error()})
+	} else {
+		output = append(output, LogLevelOutput{ComponentName: cConfig.ComponentName, Status: "Success"})
 	}
+
 	outputFormat := CharReplacer.Replace(options.Format)
 	if outputFormat == "" {
-		outputFormat = GetCommandOptionWithDefault("loglevel-set", "format", DEFAULT_SETLOGLEVEL_FORMAT)
+		outputFormat = GetCommandOptionWithDefault("loglevel-clear", "format", DEFAULT_SETLOGLEVEL_FORMAT)
 	}
 
 	result := CommandResult{
@@ -365,5 +318,6 @@ func (options *ClearLogLevelsOpts) Execute(args []string) error {
 	}
 
 	GenerateOutput(&result)
+	cm.Backend.Client.Close()
 	return nil
 }
