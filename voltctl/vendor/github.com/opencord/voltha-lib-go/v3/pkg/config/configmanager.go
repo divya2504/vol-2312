@@ -34,17 +34,6 @@ const (
 	kvStorePathSeparator     = "/"
 )
 
-type KvStore struct {
-        KvClient            kvstore.Client
-        KVStoreType         string
-        KVStoreHost         string
-        KVStorePort         int
-        KVStoreTimeout      int
-        KVStoreDataPrefix   string
-        KVStoreConfigPrefix string
-}
-
-
 // ConfigType represents the type for which config is created inside the kvstore
 // For example, loglevel
 type ConfigType int
@@ -77,7 +66,7 @@ type ConfigChangeEvent struct {
 // ConfigManager is a wrapper over backend to maintain Configuration of voltha components
 // in kvstore based persistent storage
 type ConfigManager struct {
-	Backend             *db.Backend
+	backend             *db.Backend
 	KvStoreConfigPrefix string
 }
 
@@ -106,7 +95,7 @@ func NewConfigManager(kvClient kvstore.Client, kvStoreType, kvStoreHost string, 
 
 	return &ConfigManager{
 		KvStoreConfigPrefix: defaultkvStoreConfigPath,
-		Backend: &db.Backend{
+		backend: &db.Backend{
 			Client:     kvClient,
 			StoreType:  kvStoreType,
 			Host:       kvStoreHost,
@@ -115,6 +104,36 @@ func NewConfigManager(kvClient kvstore.Client, kvStoreType, kvStoreHost string, 
 			PathPrefix: kvStoreDataPathPrefix,
 		},
 	}
+}
+
+// RetrieveComponentList list the component Names for which loglevel is stored in kvstore
+func (c *ConfigManager) RetrieveComponentList (ctx context.Context,configType ConfigType) ([]string, error) {
+        data, err := c.Backend.List(ctx, c.KvStoreConfigPrefix)
+        if err != nil {
+                log.Errorw("unable-to-get-data-from-backend", log.Fields{"error": err})
+                return nil, err
+        }
+
+        // Looping through the data recieved from the backend for config
+        // Trimming and Splitting the required key and value from data and  storing as componentName,PackageName and Level
+        // For Example, recieved key would be <Backend Prefix Path>/<Config Prefix>/<Component Name>/<Config Type>/default and value \"DEBUG\"
+        // Then in default will be stored as PackageName,componentName as <Component Name> and DEBUG will be stored as value in List struct
+        ccPathPrefix := kvStorePathSeparator + configType.String() + kvStorePathSeparator
+        pathPrefix := kvStoreDataPathPrefix + kvStorePathSeparator + c.KvStoreConfigPrefix + kvStorePathSeparator
+        var list []string
+         keys := make(map[string]interface{})
+        for attr, _:= range data {
+                cname := strings.TrimPrefix(attr, pathPrefix)
+                cName := strings.SplitN(cname, ccPathPrefix, 2)
+                if len(cName) != 2{
+                        continue
+                }
+                if _,exist := keys[cName[0]]; !exist{
+                keys[cName[0]] = nil
+                list = append(list,cName[0] )
+                }
+        }
+        return list, nil
 }
 
 // Initialize the component config
@@ -150,7 +169,7 @@ func (c *ComponentConfig) MonitorForConfigChange(ctx context.Context) chan *Conf
 
 	c.changeEventChan = make(chan *ConfigChangeEvent, 1)
 
-	c.kvStoreEventChan = c.cManager.Backend.CreateWatch(ctx, key, true)
+	c.kvStoreEventChan = c.cManager.backend.CreateWatch(ctx, key, true)
 
 	go c.processKVStoreWatchEvents()
 
@@ -163,7 +182,7 @@ func (c *ComponentConfig) processKVStoreWatchEvents() {
 
 	ccKeyPrefix := c.makeConfigPath()
 	log.Debugw("processing-kvstore-event-change", log.Fields{"key-prefix": ccKeyPrefix})
-	ccPathPrefix := c.cManager.Backend.PathPrefix + ccKeyPrefix + kvStorePathSeparator
+	ccPathPrefix := c.cManager.backend.PathPrefix + ccKeyPrefix + kvStorePathSeparator
 	for watchResp := range c.kvStoreEventChan {
 
 		if watchResp.EventType == kvstore.CONNECTIONDOWN || watchResp.EventType == kvstore.UNKNOWN {
@@ -187,7 +206,7 @@ func (c *ComponentConfig) RetrieveAll(ctx context.Context) (map[string]string, e
 	key := c.makeConfigPath()
 
 	log.Debugw("retreiving-list", log.Fields{"key": key})
-	data, err := c.cManager.Backend.List(ctx, key)
+	data, err := c.cManager.backend.List(ctx, key)
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +216,7 @@ func (c *ComponentConfig) RetrieveAll(ctx context.Context) (map[string]string, e
 	// For Example, recieved key would be <Backend Prefix Path>/<Config Prefix>/<Component Name>/<Config Type>/default and value \"DEBUG\"
 	// Then in default will be stored as key and DEBUG will be stored as value in map[string]string
 	res := make(map[string]string)
-	ccPathPrefix := c.cManager.Backend.PathPrefix + kvStorePathSeparator + key + kvStorePathSeparator
+	ccPathPrefix := c.cManager.backend.PathPrefix + kvStorePathSeparator + key + kvStorePathSeparator
 	for attr, val := range data {
 		res[strings.TrimPrefix(attr, ccPathPrefix)] = strings.Trim(fmt.Sprintf("%s", val.Value), "\"")
 	}
@@ -205,56 +224,26 @@ func (c *ComponentConfig) RetrieveAll(ctx context.Context) (map[string]string, e
 	return res, nil
 }
 
-func (c *ComponentConfig) Save(configKey string, configValue string, ctx context.Context) error {
+func (c *ComponentConfig) Save(ctx context.Context,configKey string, configValue string) error {
 	key := c.makeConfigPath() + "/" + configKey
 
 	log.Debugw("saving-key", log.Fields{"key": key, "value": configValue})
 
 	//save the data for update config
-	if err := c.cManager.Backend.Put(ctx, key, configValue); err != nil {
+	if err := c.cManager.backend.Put(ctx, key, configValue); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (c *ComponentConfig) Delete(configKey string, ctx context.Context) error {
+func (c *ComponentConfig) Delete(ctx context.Context,configKey string) error {
 	//construct key using makeConfigPath
 	key := c.makeConfigPath() + "/" + configKey
 
 	log.Debugw("deleting-key", log.Fields{"key": key})
 	//delete the config
-	if err := c.cManager.Backend.Delete(ctx, key); err != nil {
+	if err := c.cManager.backend.Delete(ctx, key); err != nil {
 		return err
 	}
 	return nil
-}
-
-func (c *ConfigManager) RetrieveComponentList (configType ConfigType) ([]string, error) {
-        data, err := c.Backend.List(context.Background(), c.KvStoreConfigPrefix)
-        if err != nil {
-                log.Errorw("unable-to-get-data-from-backend", log.Fields{"error": err})
-                return nil, err
-        }
-
-        // Looping through the data recieved from the backend for config
-        // Trimming and Splitting the required key  data and  storing as componentName
-        // For Example, recieved key would be <Backend Prefix Path>/<Config Prefix>/<Component Name>/<Config Type>/default and value \"DEBUG\"
-        // Then componentName will be stored in List 
-        ccPathPrefix := kvStorePathSeparator + configType.String() + kvStorePathSeparator
-        pathPrefix := kvStoreDataPathPrefix + kvStorePathSeparator + c.KvStoreConfigPrefix + kvStorePathSeparator
-        var list []string
-         keys := make(map[string]bool)
-        for attr, _:= range data {
-                cname := strings.TrimPrefix(attr, pathPrefix)
-                cName := strings.SplitN(cname, ccPathPrefix, 2)
-                if len(cName) != 2{
-                        continue
-                }
-                if _,exist := keys[cName[0]]; !exist{
-                keys[cName[0]] = true
-                list = append(list,cName[0] )
-                }
-        }
-                fmt.Println("the list is",list)
-        return list, nil
 }
