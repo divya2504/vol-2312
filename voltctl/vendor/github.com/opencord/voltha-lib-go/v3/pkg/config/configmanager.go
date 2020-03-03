@@ -108,7 +108,7 @@ func NewConfigManager(kvClient kvstore.Client, kvStoreType, kvStoreHost string, 
 
 // RetrieveComponentList list the component Names for which loglevel is stored in kvstore
 func (c *ConfigManager) RetrieveComponentList (ctx context.Context,configType ConfigType) ([]string, error) {
-        data, err := c.Backend.List(ctx, c.KvStoreConfigPrefix)
+        data, err := c.backend.List(ctx, c.KvStoreConfigPrefix)
         if err != nil {
                 log.Errorw("unable-to-get-data-from-backend", log.Fields{"error": err})
                 return nil, err
